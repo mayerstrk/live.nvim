@@ -53,7 +53,7 @@ function M.start_builtin_server()
 	end
 
 	local plugin_root = vim.fn.fnamemodify(vim.fn.resolve(vim.fn.expand("<sfile>:p")), ":h:h:h")
-	local server_path = plugin_root .. "/server/cmd/liveserver/main.go"
+	local server_path = plugin_root .. "/server/cmd/live/main.go"
 
 	server_process = vim.fn.jobstart({ "go", "run", server_path }, {
 		on_exit = on_server_exit,
@@ -171,7 +171,7 @@ local function stop_all_processes()
 	if server_process then
 		pcall(vim.fn.jobstop, server_process)
 		-- Ensure the Go server process is terminated
-		vim.fn.system('pkill -f "go run .*liveserver/main.go"')
+		vim.fn.system('pkill -f "go run .*live/main.go"')
 		server_process = nil
 	end
 
