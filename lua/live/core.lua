@@ -13,6 +13,8 @@ local last_content = ""
 local update_timer = nil
 ---@type number|nil
 local server_port = nil
+---@type boolean
+local is_running = false
 
 ---@param _ number
 ---@param exit_code number
@@ -47,6 +49,11 @@ end
 ---Starts the built-in Go server
 ---@return nil
 function M.start_builtin_server()
+	if is_running then
+		print("Server is already running")
+		return
+	end
+
 	if server_process then
 		vim.api.nvim_err_writeln("Server is already running")
 		return
@@ -65,6 +72,7 @@ function M.start_builtin_server()
 		return
 	end
 
+	is_running = true
 	print("Started built-in server")
 end
 
@@ -111,6 +119,11 @@ end
 ---@param port number
 ---@return nil
 function M.connect_to_server(host, port)
+	if is_running then
+		print("Already connected to a server")
+		return
+	end
+
 	if websocat_process then
 		vim.api.nvim_err_writeln("Already connected to a server")
 		return
@@ -129,12 +142,17 @@ function M.connect_to_server(host, port)
 	end
 
 	last_content = util.get_buffer_content()
+	is_running = true
 	print("Connected to WebSocket server")
 end
 
 ---Handles text change events
 ---@return nil
 function M.on_text_change()
+	if not is_running then
+		print("on_text_change handler attempted to run when server is not running")
+		return
+	end
 	if update_timer then
 		vim.fn.timer_stop(update_timer)
 	end
@@ -162,11 +180,13 @@ local function stop_all_processes()
 		vim.fn.timer_stop(update_timer)
 		update_timer = nil
 	end
+	print("Stopped debounce timer")
 
 	if websocat_process then
 		pcall(vim.fn.jobstop, websocat_process)
 		websocat_process = nil
 	end
+	print("Stopped websocat process")
 
 	if server_process then
 		pcall(vim.fn.jobstop, server_process)
@@ -174,21 +194,26 @@ local function stop_all_processes()
 		vim.fn.system('pkill -f "go run .*live/main.go"')
 		server_process = nil
 	end
+	print("Stopped server process")
 
 	last_content = ""
 	server_port = nil
-	print("Stopped live synchronization")
 end
 
 ---Handles buffer unload events
 ---@return nil
 function M.on_buffer_unload()
-	stop_all_processes()
+	M.stop()
 end
 
 ---Stops all processes (public API for LiveStop command)
 ---@return nil
 function M.stop()
+	if not is_running then
+		print("Attempted to stop but no server is running")
+		return
+	end
+
 	stop_all_processes()
 end
 
@@ -196,16 +221,11 @@ end
 ---@return nil
 function M.disable_plugin()
 	stop_all_processes()
+	print("Stopped live synchronization")
 end
 
 ---Setup function to be called when the plugin is loaded
 ---@return nil
-function M.setup()
-	vim.api.nvim_create_autocmd("VimLeavePre", {
-		callback = function()
-			stop_all_processes()
-		end,
-	})
-end
+function M.setup() end
 
 return M
