@@ -8,6 +8,3 @@ if vim.g.loaded_live_nvim == 1 then
 	return
 end
 vim.g.loaded_live_nvim = 1
-
--- Load the plugin
-require("live")

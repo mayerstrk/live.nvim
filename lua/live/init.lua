@@ -14,7 +14,6 @@ local VERSION = "0.1.0"
 ---@param opts table|nil
 local function setup(opts)
 	opts = opts or {}
-	-- You can add user configuration handling here in the future
 	live.setup()
 end
 

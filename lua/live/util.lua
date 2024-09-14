@@ -34,7 +34,6 @@ function M.create_diff(old_content, new_content)
 	if old_content ~= new_content then
 		local ok, diff = pcall(vim.diff, old_content, new_content, {
 			algorithm = "myers",
-			context = 0,
 		})
 		if ok then
 			return diff
