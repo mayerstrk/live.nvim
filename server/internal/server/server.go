@@ -6,8 +6,8 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/yourusername/live.nvim/server/internal/handlers"
-	"github.com/yourusername/live.nvim/server/internal/utils"
+	"github.com/mayerstrk/live.nvim/server/internal/handlers"
+	"github.com/mayerstrk/live.nvim/server/internal/utils"
 )
 
 type Server struct {
