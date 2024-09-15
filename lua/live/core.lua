@@ -64,84 +64,64 @@ end
 ---Starts the built-in Go server
 ---@return nil
 function M.start_builtin_server()
-    if is_running then
-        log("Server is already running")
-        return
-    end
+	if is_running then
+		log("Server is already running")
+		return
+	end
 
-    if server_process then
-        error_log("Server process exists but is_running is false. This shouldn't happen.")
-        return
-    end
+	if server_process then
+		error_log("Server process exists but is_running is false. This shouldn't happen.")
+		return
+	end
 
-    local plugin_root = vim.fn.fnamemodify(vim.fn.resolve(vim.fn.expand("<sfile>:p")), ":h:h:h")
-    local server_dir = plugin_root .. "/server"
-    local server_file = "cmd/live/main.go"
+	local plugin_root = vim.fn.fnamemodify(vim.fn.resolve(vim.fn.expand("<sfile>:p")), ":h:h:h")
+	local server_dir = plugin_root .. "/server"
+	local server_file = "cmd/live/main.go"
 
-    if not vim.fn.isdirectory(server_dir) then
-        error_log("Server directory not found at: " .. server_dir)
-        return
-    end
+	if not vim.fn.isdirectory(server_dir) then
+		error_log("Server directory not found at: " .. server_dir)
+		return
+	end
 
-    log("Attempting to start server from directory: " .. server_dir)
+	log("Attempting to start server from directory: " .. server_dir)
 
-    -- Change to the server directory
-    local original_dir = vim.fn.getcwd()
-    vim.fn.chdir(server_dir)
+	-- Change to the server directory
+	local original_dir = vim.fn.getcwd()
+	vim.fn.chdir(server_dir)
 
-    -- Start the server process
-    server_process = vim.fn.jobstart({"go", "run", server_file}, {
-        on_stdout = function(_, data)
-            for _, line in ipairs(data) do
-                if line ~= "" then
-                    log("Server stdout: " .. line)
-                end
-            end
-        end,
-        on_stderr = function(_, data)
-            for _, line in ipairs(data) do
-                if line ~= "" then
-                    error_log("Server stderr: " .. line)
-                end
-            end
-        end,
-        on_exit = function(_, exit_code)
-            log("Server process exited with code: " .. exit_code)
-            server_process = nil
-            is_running = false
-        end
-    })
+	-- Start the server process
+	server_process = vim.fn.jobstart({ "go", "run", server_file }, {
+		on_stdout = function(_, data)
+			for _, line in ipairs(data) do
+				if line ~= "" then
+					log("Server stdout: " .. line)
+				end
+			end
+		end,
+		on_stderr = function(_, data)
+			for _, line in ipairs(data) do
+				if line ~= "" then
+					error_log("Server stderr: " .. line)
+				end
+			end
+		end,
+		on_exit = function(_, exit_code)
+			log("Server process exited with code: " .. exit_code)
+			server_process = nil
+			is_running = false
+		end,
+	})
 
-    -- Change back to the original directory
-    vim.fn.chdir(original_dir)
+	-- Change back to the original directory
+	vim.fn.chdir(original_dir)
 
-    if server_process <= 0 then
-        error_log("Failed to start server process. Return code: " .. server_process)
-        return
-    end
-
-    is_running = true
-    log("Started built-in server with pid: " .. server_process)
-end
-
-	-- If we get here, the server started successfully in the background
-	-- We need to find its PID
-	local pid_output = vim.fn.system({ "pgrep", "-f", "go run.*" .. vim.fn.fnamemodify(server_file, ":t") })
-	server_process = tonumber(pid_output)
-
-	if not server_process then
-		error_log("Failed to get server PID")
+	if server_process <= 0 then
+		error_log("Failed to start server process. Return code: " .. server_process)
 		return
 	end
 
 	is_running = true
 	log("Started built-in server with pid: " .. server_process)
-
-	-- Set up stdout and stderr handlers
-	vim.fn.jobstart({ "tail", "-f", "/proc/" .. server_process .. "/fd/1" }, {
-		on_stdout = on_server_stdout,
-		on_stderr = on_server_stderr,
-	})
 end
 
 ---Opens the default browser to view the synced content
