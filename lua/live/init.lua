@@ -10,28 +10,12 @@ local live = require("live.core")
 -- Add a version number for easier management
 local VERSION = "0.1.0"
 
-local augroup = vim.api.nvim_create_augroup("LiveNvim", { clear = true })
-
 -- Implement a setup function for user configuration
 ---@param opts table|nil
 local function setup(opts)
 	opts = opts or {}
 	-- You can add user configuration handling here in the future
 	live.setup()
-end
-
-local function setup_autocommands()
-	vim.api.nvim_clear_autocmds({ group = augroup })
-	vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
-		group = augroup,
-		pattern = "*",
-		callback = live.on_text_change,
-	})
-	vim.api.nvim_create_autocmd("BufUnload", {
-		group = augroup,
-		pattern = "*",
-		callback = live.on_buffer_unload,
-	})
 end
 
 -- LiveStart command
@@ -48,16 +32,29 @@ vim.api.nvim_create_user_command("LiveStart", function(opts)
 		live.open_browser(port)
 	else
 		vim.api.nvim_err_writeln("Usage: LiveStart [host port]")
-		return
 	end
-	setup_autocommands()
 end, { nargs = "*" })
 
 -- LiveStop command
 vim.api.nvim_create_user_command("LiveStop", function()
 	live.stop()
-	vim.api.nvim_clear_autocmds({ group = augroup })
 end, {})
+
+-- LiveCheckServer command
+vim.api.nvim_create_user_command("LiveCheckServer", function()
+	live.check_running_servers()
+end, {})
+
+-- Auto-commands for text changes and buffer unload
+vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
+	pattern = "*",
+	callback = live.on_text_change,
+})
+
+vim.api.nvim_create_autocmd("BufUnload", {
+	pattern = "*",
+	callback = live.on_buffer_unload,
+})
 
 -- Return the module with setup function
 return {

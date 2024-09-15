@@ -24,9 +24,32 @@ local function error_log(message)
 	vim.api.nvim_err_writeln("LiveNvim Error: " .. message)
 end
 
+local function check_server_running()
+	local handle = io.popen("pgrep -f 'go run.*live/main.go'")
+	if handle then
+		local result = handle:read("*a")
+		handle:close()
+
+		local pids = {}
+		for pid in result:gmatch("%d+") do
+			table.insert(pids, tonumber(pid))
+		end
+
+		return pids
+	end
+	return {}
+end
+
 ---Starts the built-in Go server
 ---@return nil
 function M.start_builtin_server()
+	local running_servers = check_server_running()
+	if #running_servers > 0 then
+		error_log("Server instances already running with PIDs: " .. table.concat(running_servers, ", "))
+		error_log("Please stop these instances before starting a new one.")
+		return
+	end
+
 	if is_running then
 		log("Server is already running")
 		return
@@ -47,83 +70,85 @@ function M.start_builtin_server()
 	end
 
 	log("Attempting to start server from directory: " .. server_dir)
-
-	-- Log current working directory before changing
 	log("Current working directory before change: " .. vim.fn.getcwd())
 
-	-- Change to the server directory
 	local original_dir = vim.fn.getcwd()
 	vim.fn.chdir(server_dir)
 
-	-- Log current working directory after changing
 	log("Current working directory after change: " .. vim.fn.getcwd())
-
-	-- Log the exact command we're about to run
 	log("Running command: go run " .. server_file)
 
-	-- Start the server process
-	server_process = vim.fn.jobstart({ "go", "run", server_file }, {
-		on_stdout = function(_, data)
-			vim.schedule(function()
-				for _, line in ipairs(data) do
-					if line ~= "" then
-						log("Server stdout: " .. line)
-						local port = line:match("Server started on port (%d+)")
-						if port then
-							server_port = tonumber(port)
-							if server_port then
-								log("Server started on port " .. server_port)
-								M.connect_to_server(util.LOCALHOST, server_port)
-								M.open_browser(server_port)
-							else
-								error_log("Failed to parse server port number")
-							end
-						end
-					end
-				end
-			end)
-		end,
-		on_stderr = function(_, data)
-			vim.schedule(function()
-				for _, line in ipairs(data) do
-					if line ~= "" then
-						error_log("Server stderr: " .. line)
-					end
-				end
-			end)
-		end,
-		on_exit = function(_, exit_code)
-			vim.schedule(function()
-				log("Server process exited with code: " .. exit_code)
-				server_process = nil
-				is_running = false
-			end)
-		end,
-	})
+	---@type userdata
+	local stdout = vim.loop.new_pipe(false)
+	---@type userdata
+	local stderr = vim.loop.new_pipe(false)
 
-	-- Log current working directory before changing back
-	log("Current working directory before changing back: " .. vim.fn.getcwd())
+	local handle, pid
+	handle, pid = vim.loop.spawn("go", {
+		args = { "run", server_file },
+		stdio = { nil, stdout, stderr },
+		cwd = server_dir,
+	}, function(code, signal)
+		stdout:close()
+		stderr:close()
+		if handle then
+			handle:close()
+		end
+		vim.schedule(function()
+			log("Server process exited with code: " .. tostring(code) .. " and signal: " .. tostring(signal))
+			server_process = nil
+			is_running = false
+		end)
+	end)
 
-	-- Change back to the original directory
-	vim.fn.chdir(original_dir)
-
-	-- Log current working directory after changing back
-	log("Current working directory after changing back: " .. vim.fn.getcwd())
-
-	if server_process <= 0 then
-		error_log("Failed to start server process. Return code: " .. server_process)
+	if not handle then
+		error_log("Failed to start server process")
+		vim.fn.chdir(original_dir)
 		return
 	end
 
+	server_process = pid
 	is_running = true
-	log("Started built-in server with job id: " .. server_process)
 
-	-- Set a timer to check if the server is still running after a short delay
+	log("Started built-in server with PID: " .. tostring(pid))
+
+	vim.loop.read_start(stdout, function(err, data)
+		assert(not err, err)
+		if data then
+			vim.schedule(function()
+				log("Server stdout: " .. data)
+				local port = data:match("Server started on port (%d+)")
+				if port then
+					server_port = tonumber(port)
+					if server_port then
+						log("Server started on port " .. server_port)
+						M.connect_to_server(util.LOCALHOST, server_port)
+						M.open_browser(server_port)
+					else
+						error_log("Failed to parse server port number")
+					end
+				end
+			end)
+		end
+	end)
+
+	vim.loop.read_start(stderr, function(err, data)
+		assert(not err, err)
+		if data then
+			vim.schedule(function()
+				error_log("Server stderr: " .. data)
+			end)
+		end
+	end)
+
+	vim.fn.chdir(original_dir)
+	log("Current working directory after changing back: " .. vim.fn.getcwd())
+
 	vim.defer_fn(function()
 		if not is_running then
 			error_log("Server stopped shortly after starting. Check server logs for errors.")
 		end
-	end, 1000) -- Check after 1 second
+	end, 1000)
 end
 
 ---Opens the default browser to view the synced content
@@ -238,18 +263,14 @@ end
 ---Stops all processes (public API for LiveStop command)
 ---@return nil
 function M.stop()
-	if not is_running then
-		log("Attempted to stop but no server is running")
-		return
-	end
-
-	if server_process then
-		vim.fn.jobstop(server_process)
-		log("Sent stop signal to server process")
+	local running_servers = check_server_running()
+	for _, pid in ipairs(running_servers) do
+		log("Attempting to stop server with PID: " .. pid)
+		vim.loop.kill(pid, "SIGTERM")
 	end
 
 	if websocat_process then
-		vim.fn.jobstop(websocat_process)
+		vim.loop.kill(websocat_process, "SIGTERM")
 		log("Sent stop signal to WebSocket process")
 	end
 
@@ -258,18 +279,19 @@ function M.stop()
 		update_timer = nil
 	end
 
-	-- Set a timer to force kill if it doesn't stop gracefully
 	vim.defer_fn(function()
-		if is_running then
-			error_log("Server didn't stop gracefully, forcing shutdown")
-			vim.fn.system('pkill -f "go run.*live/main.go"')
-			vim.fn.system('pkill -f "websocat"')
-			is_running = false
-			server_process = nil
-			websocat_process = nil
+		running_servers = check_server_running()
+		if #running_servers > 0 then
+			error_log("Some server instances are still running. Forcing shutdown...")
+			for _, pid in ipairs(running_servers) do
+				vim.loop.kill(pid, "SIGKILL")
+			end
 		end
+		is_running = false
+		server_process = nil
+		websocat_process = nil
 		log("Stopped live synchronization")
-	end, 5000) -- Wait for 5 seconds before force killing
+	end, 5000)
 end
 
 ---Function to be called when the plugin is disabled
@@ -282,6 +304,16 @@ end
 ---@return nil
 function M.setup()
 	-- Any setup logic can be added here if needed in the future
+end
+
+-- Add a new function to check for running servers
+function M.check_running_servers()
+	local running_servers = check_server_running()
+	if #running_servers > 0 then
+		log("Server instances running with PIDs: " .. table.concat(running_servers, ", "))
+	else
+		log("No server instances are currently running.")
+	end
 end
 
 return M
