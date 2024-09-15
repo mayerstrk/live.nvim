@@ -24,43 +24,6 @@ local function error_log(message)
 	vim.api.nvim_err_writeln("LiveNvim Error: " .. message)
 end
 
----@param _ number
----@param exit_code number
-local function on_server_exit(_, exit_code)
-	vim.schedule(function()
-		log("Server process exited with code: " .. exit_code)
-		server_process = nil
-		server_port = nil
-		is_running = false
-	end)
-end
-
----@param _ number
----@param data string[]
-local function on_server_stdout(_, data)
-	for _, line in ipairs(data) do
-		local port = line:match("Server started on port (%d+)")
-		if port then
-			server_port = tonumber(port)
-			if server_port then
-				log("Server started on port " .. server_port)
-				local success, err = pcall(M.connect_to_server, util.LOCALHOST, server_port)
-				if not success then
-					error_log("Failed to connect to server: " .. tostring(err))
-					return
-				end
-				success, err = pcall(M.open_browser, server_port)
-				if not success then
-					error_log("Failed to open browser: " .. tostring(err))
-				end
-				break
-			else
-				error_log("Failed to parse server port number")
-			end
-		end
-	end
-end
-
 ---Starts the built-in Go server
 ---@return nil
 function M.start_builtin_server()
@@ -85,35 +48,67 @@ function M.start_builtin_server()
 
 	log("Attempting to start server from directory: " .. server_dir)
 
+	-- Log current working directory before changing
+	log("Current working directory before change: " .. vim.fn.getcwd())
+
 	-- Change to the server directory
 	local original_dir = vim.fn.getcwd()
 	vim.fn.chdir(server_dir)
 
+	-- Log current working directory after changing
+	log("Current working directory after change: " .. vim.fn.getcwd())
+
+	-- Log the exact command we're about to run
+	log("Running command: go run " .. server_file)
+
 	-- Start the server process
 	server_process = vim.fn.jobstart({ "go", "run", server_file }, {
 		on_stdout = function(_, data)
-			for _, line in ipairs(data) do
-				if line ~= "" then
-					log("Server stdout: " .. line)
+			vim.schedule(function()
+				for _, line in ipairs(data) do
+					if line ~= "" then
+						log("Server stdout: " .. line)
+						local port = line:match("Server started on port (%d+)")
+						if port then
+							server_port = tonumber(port)
+							if server_port then
+								log("Server started on port " .. server_port)
+								M.connect_to_server(util.LOCALHOST, server_port)
+								M.open_browser(server_port)
+							else
+								error_log("Failed to parse server port number")
+							end
+						end
+					end
 				end
-			end
+			end)
 		end,
 		on_stderr = function(_, data)
-			for _, line in ipairs(data) do
-				if line ~= "" then
-					error_log("Server stderr: " .. line)
+			vim.schedule(function()
+				for _, line in ipairs(data) do
+					if line ~= "" then
+						error_log("Server stderr: " .. line)
+					end
 				end
-			end
+			end)
 		end,
 		on_exit = function(_, exit_code)
-			log("Server process exited with code: " .. exit_code)
-			server_process = nil
-			is_running = false
+			vim.schedule(function()
+				log("Server process exited with code: " .. exit_code)
+				server_process = nil
+				is_running = false
+			end)
 		end,
 	})
 
+	-- Log current working directory before changing back
+	log("Current working directory before changing back: " .. vim.fn.getcwd())
+
 	-- Change back to the original directory
 	vim.fn.chdir(original_dir)
+
+	-- Log current working directory after changing back
+	log("Current working directory after changing back: " .. vim.fn.getcwd())
 
 	if server_process <= 0 then
 		error_log("Failed to start server process. Return code: " .. server_process)
@@ -121,7 +116,14 @@ function M.start_builtin_server()
 	end
 
 	is_running = true
-	log("Started built-in server with pid: " .. server_process)
+	log("Started built-in server with job id: " .. server_process)
+
+	-- Set a timer to check if the server is still running after a short delay
+	vim.defer_fn(function()
+		if not is_running then
+			error_log("Server stopped shortly after starting. Check server logs for errors.")
+		end
+	end, 1000) -- Check after 1 second
 end
 
 ---Opens the default browser to view the synced content
@@ -142,27 +144,16 @@ function M.open_browser(port)
 		return
 	end
 
-	local job_id = vim.fn.jobstart(cmd, {
+	vim.fn.jobstart(cmd, {
 		detach = true,
 		on_exit = function(_, code)
 			if code ~= 0 then
-				error_log("Failed to open browser. Exit code: " .. code)
+				vim.schedule(function()
+					error_log("Failed to open browser")
+				end)
 			end
 		end,
 	})
-
-	if job_id <= 0 then
-		error_log("Failed to start browser opening job")
-	end
-end
-
----@param _ number
-local function on_websocket_exit(_)
-	vim.schedule(function()
-		log("WebSocket connection closed")
-		websocat_process = nil
-		is_running = false
-	end)
 end
 
 ---Connects to a WebSocket server
@@ -170,13 +161,8 @@ end
 ---@param port number
 ---@return nil
 function M.connect_to_server(host, port)
-	if is_running then
-		log("Already connected to a server")
-		return
-	end
-
 	if websocat_process then
-		error_log("WebSocket process exists but is_running is false. This shouldn't happen.")
+		error_log("Already connected to a server")
 		return
 	end
 
@@ -184,16 +170,38 @@ function M.connect_to_server(host, port)
 	local url = string.format("ws://%s:%d%s", host, port, endpoint)
 
 	websocat_process = vim.fn.jobstart({ "websocat", url }, {
-		on_exit = on_websocket_exit,
+		on_stdout = function(_, data)
+			vim.schedule(function()
+				for _, line in ipairs(data) do
+					if line ~= "" then
+						log("WebSocket received: " .. line)
+					end
+				end
+			end)
+		end,
+		on_stderr = function(_, data)
+			vim.schedule(function()
+				for _, line in ipairs(data) do
+					if line ~= "" then
+						error_log("WebSocket error: " .. line)
+					end
+				end
+			end)
+		end,
+		on_exit = function(_, code)
+			vim.schedule(function()
+				log("WebSocket connection closed with code: " .. code)
+				websocat_process = nil
+			end)
+		end,
 	})
 
 	if websocat_process <= 0 then
-		error_log("Failed to establish WebSocket connection. Return code: " .. websocat_process)
+		error_log("Failed to establish WebSocket connection")
 		return
 	end
 
 	last_content = util.get_buffer_content()
-	is_running = true
 	log("Connected to WebSocket server")
 end
 
@@ -201,14 +209,10 @@ end
 ---@return nil
 function M.on_text_change()
 	if not is_running then
-		log("on_text_change handler attempted to run when server is not running")
 		return
 	end
 	if update_timer then
-		local stop_success, stop_err = pcall(vim.fn.timer_stop, update_timer)
-		if not stop_success then
-			error_log("Failed to stop existing update timer: " .. tostring(stop_err))
-		end
+		vim.fn.timer_stop(update_timer)
 	end
 	update_timer = vim.fn.timer_start(util.DEBOUNCE_MS, function()
 		local current_content = util.get_buffer_content()
@@ -219,60 +223,10 @@ function M.on_text_change()
 			if not success then
 				error_log("Failed to send update: " .. tostring(err))
 			end
-		elseif not websocat_process then
-			error_log("WebSocket process not found when trying to send update")
 		end
 
 		last_content = current_content
 	end)
-	if not update_timer then
-		error_log("Failed to start update timer")
-	end
-end
-
----Stops all processes and resets state
----@return nil
-local function stop_all_processes()
-	if update_timer then
-		local stop_success, stop_err = pcall(vim.fn.timer_stop, update_timer)
-		if stop_success then
-			log("Stopped debounce timer")
-		else
-			error_log("Failed to stop debounce timer: " .. tostring(stop_err))
-		end
-		update_timer = nil
-	end
-
-	if websocat_process then
-		local stop_success, stop_err = pcall(vim.fn.jobstop, websocat_process)
-		if stop_success then
-			log("Stopped websocat process")
-		else
-			error_log("Failed to stop websocat process: " .. tostring(stop_err))
-		end
-		websocat_process = nil
-	end
-
-	if server_process then
-		local server_stopped, stop_err = pcall(vim.fn.jobstop, server_process)
-		-- Ensure the Go server process is terminated
-		local pkill_success, pkill_result = pcall(vim.fn.system, 'pkill -f "go run .*live/main.go"')
-		if server_stopped then
-			log("Stopped server process with pid: " .. server_process)
-		else
-			error_log("Failed to stop server process with pid: " .. server_process .. ". Error: " .. tostring(stop_err))
-		end
-		if pkill_success then
-			log("Pkill result: " .. vim.trim(pkill_result))
-		else
-			error_log("Failed to run pkill command: " .. tostring(pkill_result))
-		end
-		server_process = nil
-		last_content = ""
-		server_port = nil
-	end
-
-	is_running = false
 end
 
 ---Handles buffer unload events
@@ -289,15 +243,39 @@ function M.stop()
 		return
 	end
 
-	stop_all_processes()
-	log("Stopped live synchronization")
+	if server_process then
+		vim.fn.jobstop(server_process)
+		log("Sent stop signal to server process")
+	end
+
+	if websocat_process then
+		vim.fn.jobstop(websocat_process)
+		log("Sent stop signal to WebSocket process")
+	end
+
+	if update_timer then
+		vim.fn.timer_stop(update_timer)
+		update_timer = nil
+	end
+
+	-- Set a timer to force kill if it doesn't stop gracefully
+	vim.defer_fn(function()
+		if is_running then
+			error_log("Server didn't stop gracefully, forcing shutdown")
+			vim.fn.system('pkill -f "go run.*live/main.go"')
+			vim.fn.system('pkill -f "websocat"')
+			is_running = false
+			server_process = nil
+			websocat_process = nil
+		end
+		log("Stopped live synchronization")
+	end, 5000) -- Wait for 5 seconds before force killing
 end
 
 ---Function to be called when the plugin is disabled
 ---@return nil
 function M.disable_plugin()
-	stop_all_processes()
-	log("Plugin disabled")
+	M.stop()
 end
 
 ---Setup function to be called when the plugin is loaded
