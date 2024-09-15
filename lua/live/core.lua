@@ -73,7 +73,8 @@ function M.start_builtin_server()
 	end
 
 	is_running = true
-	print("Started built-in server")
+
+	print("Started built-in server in whth pid: " .. server_process)
 end
 
 ---Opens the default browser to view the synced content
@@ -189,15 +190,18 @@ local function stop_all_processes()
 	print("Stopped websocat process")
 
 	if server_process then
-		pcall(vim.fn.jobstop, server_process)
+		local server_stopped = pcall(vim.fn.jobstop, server_process)
 		-- Ensure the Go server process is terminated
 		vim.fn.system('pkill -f "go run .*live/main.go"')
-		server_process = nil
+		if server_stopped then
+			print("Stopped server process with pid: " .. server_process)
+			server_process = nil
+			last_content = ""
+			server_port = nil
+		else
+			print("Failed to stop server process with pid: " .. server_process)
+		end
 	end
-	print("Stopped server process")
-
-	last_content = ""
-	server_port = nil
 end
 
 ---Handles buffer unload events
