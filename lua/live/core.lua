@@ -2,9 +2,12 @@
 local M = {}
 local util = require("live.util")
 
+-- Assign vim.loop to a local variable
+local uv = vim.loop
+
 -- State variables
----@type number|nil
-local server_process = nil
+---@type userdata|nil
+local server_handle = nil
 ---@type number|nil
 local websocat_process = nil
 ---@type string
@@ -55,8 +58,8 @@ function M.start_builtin_server()
 		return
 	end
 
-	if server_process then
-		error_log("Server process exists but is_running is false. This shouldn't happen.")
+	if server_handle then
+		error_log("Server handle exists but is_running is false. This shouldn't happen.")
 		return
 	end
 
@@ -79,12 +82,12 @@ function M.start_builtin_server()
 	log("Running command: go run " .. server_file)
 
 	---@type userdata
-	local stdout = vim.loop.new_pipe(false)
+	local stdout = uv.new_pipe(false)
 	---@type userdata
-	local stderr = vim.loop.new_pipe(false)
+	local stderr = uv.new_pipe(false)
 
-	local handle, pid
-	handle, pid = vim.loop.spawn("go", {
+	---@type userdata|nil
+	local handle = uv.spawn("go", {
 		args = { "run", server_file },
 		stdio = { nil, stdout, stderr },
 		cwd = server_dir,
@@ -96,7 +99,7 @@ function M.start_builtin_server()
 		end
 		vim.schedule(function()
 			log("Server process exited with code: " .. tostring(code) .. " and signal: " .. tostring(signal))
-			server_process = nil
+			server_handle = nil
 			is_running = false
 		end)
 	end)
@@ -107,12 +110,13 @@ function M.start_builtin_server()
 		return
 	end
 
-	server_process = pid
+	server_handle = handle
 	is_running = true
 
+	local pid = handle:get_pid()
 	log("Started built-in server with PID: " .. tostring(pid))
 
-	vim.loop.read_start(stdout, function(err, data)
+	uv.read_start(stdout, function(err, data)
 		assert(not err, err)
 		if data then
 			vim.schedule(function()
@@ -132,7 +136,7 @@ function M.start_builtin_server()
 		end
 	end)
 
-	vim.loop.read_start(stderr, function(err, data)
+	uv.read_start(stderr, function(err, data)
 		assert(not err, err)
 		if data then
 			vim.schedule(function()
@@ -263,14 +267,13 @@ end
 ---Stops all processes (public API for LiveStop command)
 ---@return nil
 function M.stop()
-	local running_servers = check_server_running()
-	for _, pid in ipairs(running_servers) do
-		log("Attempting to stop server with PID: " .. pid)
-		vim.loop.kill(pid, "SIGTERM")
+	if server_handle then
+		server_handle:kill("sigterm")
+		log("Sent stop signal to server process")
 	end
 
 	if websocat_process then
-		vim.loop.kill(websocat_process, "SIGTERM")
+		vim.fn.jobstop(websocat_process)
 		log("Sent stop signal to WebSocket process")
 	end
 
@@ -280,15 +283,15 @@ function M.stop()
 	end
 
 	vim.defer_fn(function()
-		running_servers = check_server_running()
+		local running_servers = check_server_running()
 		if #running_servers > 0 then
 			error_log("Some server instances are still running. Forcing shutdown...")
 			for _, pid in ipairs(running_servers) do
-				vim.loop.kill(pid, "SIGKILL")
+				uv.kill(pid, "sigkill")
 			end
 		end
 		is_running = false
-		server_process = nil
+		server_handle = nil
 		websocat_process = nil
 		log("Stopped live synchronization")
 	end, 5000)
@@ -306,7 +309,8 @@ function M.setup()
 	-- Any setup logic can be added here if needed in the future
 end
 
--- Add a new function to check for running servers
+---Checks for running server instances
+---@return nil
 function M.check_running_servers()
 	local running_servers = check_server_running()
 	if #running_servers > 0 then
