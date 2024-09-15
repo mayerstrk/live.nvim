@@ -75,25 +75,54 @@ function M.start_builtin_server()
 	end
 
 	local plugin_root = vim.fn.fnamemodify(vim.fn.resolve(vim.fn.expand("<sfile>:p")), ":h:h:h")
-	local server_path = plugin_root .. "/server/cmd/live/main.go"
+	local server_dir = plugin_root .. "/server"
+	local server_file = "cmd/live/main.go"
 
-	if not vim.fn.filereadable(server_path) then
-		error_log("Server file not found at: " .. server_path)
+	if not vim.fn.isdirectory(server_dir) then
+		error_log("Server directory not found at: " .. server_dir)
 		return
 	end
 
-	server_process = vim.fn.jobstart({ "go", "run", server_path }, {
-		on_exit = on_server_exit,
-		on_stdout = on_server_stdout,
-	})
+	log("Attempting to start server from directory: " .. server_dir)
 
-	if server_process <= 0 then
-		error_log("Failed to start server process. Return code: " .. server_process)
+	-- Change to the server directory
+	local original_dir = vim.fn.getcwd()
+	vim.fn.chdir(server_dir)
+
+	-- Capture the output of the 'go run' command
+	local output = vim.fn.system({ "go", "run", server_file })
+	local exit_code = vim.v.shell_error
+
+	-- Change back to the original directory
+	vim.fn.chdir(original_dir)
+
+	-- Log the output and exit code
+	log("Server start attempt output:\n" .. output)
+	log("Server start attempt exit code: " .. exit_code)
+
+	if exit_code ~= 0 then
+		error_log("Failed to start server. Exit code: " .. exit_code)
+		return
+	end
+
+	-- If we get here, the server started successfully in the background
+	-- We need to find its PID
+	local pid_output = vim.fn.system({ "pgrep", "-f", "go run.*" .. vim.fn.fnamemodify(server_file, ":t") })
+	server_process = tonumber(pid_output)
+
+	if not server_process then
+		error_log("Failed to get server PID")
 		return
 	end
 
 	is_running = true
 	log("Started built-in server with pid: " .. server_process)
+
+	-- Set up stdout and stderr handlers
+	vim.fn.jobstart({ "tail", "-f", "/proc/" .. server_process .. "/fd/1" }, {
+		on_stdout = on_server_stdout,
+		on_stderr = on_server_stderr,
+	})
 end
 
 ---Opens the default browser to view the synced content
