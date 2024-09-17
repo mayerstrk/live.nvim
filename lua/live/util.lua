@@ -4,7 +4,7 @@ local uv = vim.loop
 local lfs = require("lfs") -- LuaFileSystem library (you may need to install it)
 
 -- Function to get the absolute path to the project root
-local function get_project_root()
+function M.get_project_root()
 	-- Get the current file's directory
 	local current_file = debug.getinfo(1, "S").source:sub(2)
 	local current_dir = current_file:match("(.*/)")
