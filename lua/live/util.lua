@@ -15,10 +15,21 @@ end
 -- Operation: Get Available Port
 function M.get_available_port()
 	local server = uv.new_tcp()
-	server:bind("127.0.0.1", 0)
-	local _, port = server:getsockname()
+	local ok, err = pcall(function()
+		server:bind("127.0.0.1", 0)
+	end)
+	if not ok then
+		M.log_error("Failed to bind TCP server: " .. err)
+		return nil
+	end
+
+	local address = server:getsockname()
 	server:close()
-	return port
+	if not address or not address.port then
+		M.log_error("Failed to get socket name.")
+		return nil
+	end
+	return address.port
 end
 -- End of operation: Get Available Port
 

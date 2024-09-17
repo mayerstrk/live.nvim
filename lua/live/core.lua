@@ -21,6 +21,9 @@ function M.start(server_address, endpoint)
 		if not server_address then
 			-- Start the Go server
 			port = util.get_available_port()
+			if not port then
+				error("Failed to obtain an available port.")
+			end
 			server_job = Job:new({
 				command = "go",
 				args = { "run", "path/to/server.go", "--port", tostring(port) },
