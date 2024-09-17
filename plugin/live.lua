@@ -3,8 +3,22 @@ if vim.fn.has("nvim-0.5") == 0 then
 	return
 end
 
--- Prevent loading the plugin multiple times
-if vim.g.loaded_live_nvim == 1 then
-	return
-end
-vim.g.loaded_live_nvim = 1
+local core = require("live.core")
+
+vim.api.nvim_create_user_command("LiveStart", function(opts)
+	local ok, err = pcall(function()
+		core.start(opts.args)
+	end)
+	if not ok then
+		require("live.util").notify_error("Error executing LiveStart: " .. err)
+	end
+end, { nargs = "*" })
+
+vim.api.nvim_create_user_command("LiveStop", function()
+	local ok, err = pcall(function()
+		core.stop()
+	end)
+	if not ok then
+		require("live.util").notify_error("Error executing LiveStop: " .. err)
+	end
+end, {})

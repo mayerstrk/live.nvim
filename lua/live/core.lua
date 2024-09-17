@@ -1,323 +1,351 @@
----@class Live
-local M = {}
+local uv = vim.loop
+local api = vim.api
 local util = require("live.util")
 
--- Assign vim.loop to a local variable
-local uv = vim.loop
+local M = {}
 
--- State variables
----@type userdata|nil
-local server_handle = nil
----@type number|nil
-local websocat_process = nil
----@type string
-local last_content = ""
----@type number|nil
-local update_timer = nil
----@type number|nil
-local server_port = nil
----@type boolean
-local is_running = false
+M.server_process = nil
+M.ws_process = nil
+M.debounce_timer = nil
+M.server_address = nil
+M.endpoint = nil
 
-local function log(message)
-	print("LiveNvim: " .. message)
+function M.setup(opts)
+	-- No setup necessary for now, placeholder for future updates
 end
 
-local function error_log(message)
-	vim.api.nvim_err_writeln("LiveNvim Error: " .. message)
-end
+function M.start(args)
+	-- _______
+	-- operation: Start live synchronization
+	-- _______
 
-local function check_server_running()
-	local handle = io.popen("pgrep -f 'go run.*live/main.go'")
-	if handle then
-		local result = handle:read("*a")
-		handle:close()
+	local ok, err = pcall(function()
+		local server_address, endpoint = M.parse_args(args)
+		M.detect_filetype()
 
-		local pids = {}
-		for pid in result:gmatch("%d+") do
-			table.insert(pids, tonumber(pid))
+		if not server_address then
+			server_address = M.start_server()
+			if not server_address then
+				error("Failed to start the Go server.")
+			end
 		end
 
-		return pids
+		M.server_address = server_address
+		M.endpoint = endpoint or M.endpoint
+
+		M.sync_buffer()
+
+		M.set_autocommands()
+
+		util.notify_info("Live synchronization started.")
+	end)
+
+	if not ok then
+		util.notify_error("Error starting live.nvim: " .. err)
 	end
-	return {}
+
+	-- end of operation: Start live synchronization
+	-- _______
 end
 
----Starts the built-in Go server
----@return nil
-function M.start_builtin_server()
-	local running_servers = check_server_running()
-	if #running_servers > 0 then
-		error_log("Server instances already running with PIDs: " .. table.concat(running_servers, ", "))
-		error_log("Please stop these instances before starting a new one.")
-		return
+function M.stop()
+	-- _______
+	-- operation: Stop live synchronization
+	-- _______
+
+	local ok, err = pcall(function()
+		M.stop_sync()
+		M.stop_server()
+		M.remove_autocommands()
+		util.notify_info("Live synchronization stopped.")
+	end)
+
+	if not ok then
+		util.notify_error("Error stopping live.nvim: " .. err)
 	end
 
-	if is_running then
-		log("Server is already running")
-		return
+	-- end of operation: Stop live synchronization
+	-- _______
+end
+
+function M.parse_args(args)
+	-- _______
+	-- operation: Parse command arguments
+	-- _______
+
+	if not args or args == "" then
+		return nil, nil
+	end
+	local arg_list = vim.split(args, "%s+")
+	return arg_list[1], arg_list[2]
+
+	-- end of operation: Parse command arguments
+	-- _______
+end
+
+function M.detect_filetype()
+	-- _______
+	-- operation: Detect filetype to set endpoint
+	-- _______
+
+	local ok, ft = pcall(function()
+		return vim.bo.filetype
+	end)
+
+	if not ok then
+		util.notify_error("Failed to detect filetype.")
+		ft = "plain"
 	end
 
-	if server_handle then
-		error_log("Server handle exists but is_running is false. This shouldn't happen.")
-		return
+	if ft == "markdown" then
+		M.endpoint = "/markdown"
+	else
+		M.endpoint = "/code"
 	end
 
-	local plugin_root = vim.fn.fnamemodify(vim.fn.resolve(vim.fn.expand("<sfile>:p")), ":h:h:h")
-	local server_dir = plugin_root .. "/server"
-	local server_file = "cmd/live/main.go"
+	-- end of operation: Detect filetype to set endpoint
+	-- _______
+end
 
-	if not vim.fn.isdirectory(server_dir) then
-		error_log("Server directory not found at: " .. server_dir)
-		return
+function M.start_server()
+	-- _______
+	-- operation: Start Go server
+	-- _______
+
+	local port = util.find_free_port()
+	if not port then
+		util.notify_error("No available ports found.")
+		return nil
 	end
 
-	log("Attempting to start server from directory: " .. server_dir)
-	log("Current working directory before change: " .. vim.fn.getcwd())
+	local server_script = util.get_server_script_path()
+	if not server_script then
+		util.notify_error("Server script path not found.")
+		return nil
+	end
 
-	local original_dir = vim.fn.getcwd()
-	vim.fn.chdir(server_dir)
+	local cmd = { "go", "run", server_script, "--port", tostring(port) }
 
-	log("Current working directory after change: " .. vim.fn.getcwd())
-	log("Running command: go run " .. server_file)
-
-	---@type userdata
-	local stdout = uv.new_pipe(false)
-	---@type userdata
-	local stderr = uv.new_pipe(false)
-
-	---@type userdata|nil
-	local handle = uv.spawn("go", {
-		args = { "run", server_file },
-		stdio = { nil, stdout, stderr },
-		cwd = server_dir,
-	}, function(code, signal)
-		stdout:close()
-		stderr:close()
-		if handle then
-			handle:close()
-		end
-		vim.schedule(function()
-			log("Server process exited with code: " .. tostring(code) .. " and signal: " .. tostring(signal))
-			server_handle = nil
-			is_running = false
+	local handle
+	local ok, err = pcall(function()
+		handle = uv.spawn(cmd[1], { args = { unpack(cmd, 2) } }, function(code, signal)
+			if code ~= 0 then
+				util.notify_error(string.format("Go server exited with code %d, signal %d", code, signal))
+			end
 		end)
 	end)
 
-	if not handle then
-		error_log("Failed to start server process")
-		vim.fn.chdir(original_dir)
-		return
+	if not ok or not handle then
+		util.notify_error("Failed to start Go server process: " .. (err or "unknown error"))
+		return nil
 	end
 
-	server_handle = handle
-	is_running = true
+	M.server_process = handle
+	util.notify_info("Go server started on port " .. port)
 
-	local pid = handle:get_pid()
-	log("Started built-in server with PID: " .. tostring(pid))
+	-- end of operation: Start Go server
+	-- _______
 
-	uv.read_start(stdout, function(err, data)
-		assert(not err, err)
-		if data then
-			vim.schedule(function()
-				log("Server stdout: " .. data)
-				local port = data:match("Server started on port (%d+)")
-				if port then
-					server_port = tonumber(port)
-					if server_port then
-						log("Server started on port " .. server_port)
-						M.connect_to_server(util.LOCALHOST, server_port)
-						M.open_browser(server_port)
-					else
-						error_log("Failed to parse server port number")
-					end
-				end
-			end)
-		end
+	return "127.0.0.1:" .. port
+end
+
+function M.stop_server()
+	-- _______
+	-- operation: Stop Go server
+	-- _______
+
+	if M.server_process then
+		M.server_process:kill()
+		M.server_process:close()
+		M.server_process = nil
+		util.notify_info("Go server stopped.")
+	end
+
+	-- end of operation: Stop Go server
+	-- _______
+end
+
+function M.sync_buffer()
+	-- _______
+	-- operation: Sync buffer content
+	-- _______
+
+	local ok, err = pcall(function()
+		local content = M.get_buffer_content()
+		M.send_content(content)
 	end)
 
-	uv.read_start(stderr, function(err, data)
-		assert(not err, err)
-		if data then
-			vim.schedule(function()
-				error_log("Server stderr: " .. data)
-			end)
-		end
-	end)
-
-	vim.fn.chdir(original_dir)
-	log("Current working directory after changing back: " .. vim.fn.getcwd())
-
-	vim.defer_fn(function()
-		if not is_running then
-			error_log("Server stopped shortly after starting. Check server logs for errors.")
-		end
-	end, 1000)
-end
-
----Opens the default browser to view the synced content
----@param port number
----@return nil
-function M.open_browser(port)
-	local url = string.format("http://127.0.0.1:%d", port)
-	local cmd
-
-	if vim.fn.has("mac") == 1 then
-		cmd = { "open", url }
-	elseif vim.fn.has("unix") == 1 then
-		cmd = { "xdg-open", url }
-	elseif vim.fn.has("win32") == 1 then
-		cmd = { "cmd", "/c", "start", url }
-	else
-		error_log("Unsupported operating system")
-		return
+	if not ok then
+		util.notify_error("Failed to sync buffer: " .. err)
 	end
 
-	vim.fn.jobstart(cmd, {
-		detach = true,
-		on_exit = function(_, code)
-			if code ~= 0 then
-				vim.schedule(function()
-					error_log("Failed to open browser")
-				end)
-			end
-		end,
-	})
+	-- end of operation: Sync buffer content
+	-- _______
 end
 
----Connects to a WebSocket server
----@param host string
----@param port number
----@return nil
-function M.connect_to_server(host, port)
-	if websocat_process then
-		error_log("Already connected to a server")
-		return
-	end
+function M.get_buffer_content()
+	-- _______
+	-- operation: Get buffer content
+	-- _______
 
-	local endpoint = util.get_endpoint()
-	local url = string.format("ws://%s:%d%s", host, port, endpoint)
+	local lines = api.nvim_buf_get_lines(0, 0, -1, false)
+	return table.concat(lines, "\n")
 
-	websocat_process = vim.fn.jobstart({ "websocat", url }, {
-		on_stdout = function(_, data)
-			vim.schedule(function()
-				for _, line in ipairs(data) do
-					if line ~= "" then
-						log("WebSocket received: " .. line)
-					end
-				end
-			end)
-		end,
-		on_stderr = function(_, data)
-			vim.schedule(function()
-				for _, line in ipairs(data) do
-					if line ~= "" then
-						error_log("WebSocket error: " .. line)
-					end
-				end
-			end)
-		end,
-		on_exit = function(_, code)
-			vim.schedule(function()
-				log("WebSocket connection closed with code: " .. code)
-				websocat_process = nil
-			end)
-		end,
-	})
-
-	if websocat_process <= 0 then
-		error_log("Failed to establish WebSocket connection")
-		return
-	end
-
-	last_content = util.get_buffer_content()
-	log("Connected to WebSocket server")
+	-- end of operation: Get buffer content
+	-- _______
 end
 
----Handles text change events
----@return nil
 function M.on_text_change()
-	if not is_running then
+	-- _______
+	-- operation: Handle text change event
+	-- _______
+
+	local ok, err = pcall(function()
+		M.debounce_sync()
+	end)
+
+	if not ok then
+		util.notify_error("Error in on_text_change: " .. err)
+	end
+
+	-- end of operation: Handle text change event
+	-- _______
+end
+
+function M.debounce_sync()
+	-- _______
+	-- operation: Debounce buffer synchronization
+	-- _______
+
+	if M.debounce_timer then
+		M.debounce_timer:stop()
+		M.debounce_timer:close()
+	end
+
+	M.debounce_timer = uv.new_timer()
+	M.debounce_timer:start(200, 0, function()
+		vim.schedule(function()
+			M.sync_buffer()
+		end)
+		M.debounce_timer:stop()
+		M.debounce_timer:close()
+		M.debounce_timer = nil
+	end)
+
+	-- end of operation: Debounce buffer synchronization
+	-- _______
+end
+
+function M.send_content(content)
+	-- _______
+	-- operation: Send content via WebSocket
+	-- _______
+
+	if not M.server_address or not M.endpoint then
+		util.notify_error("Server address or endpoint not set.")
 		return
 	end
-	if update_timer then
-		vim.fn.timer_stop(update_timer)
-	end
-	update_timer = vim.fn.timer_start(util.DEBOUNCE_MS, function()
-		local current_content = util.get_buffer_content()
-		local diff = util.create_diff(last_content, current_content)
 
-		if diff and websocat_process then
-			local success, err = pcall(vim.api.nvim_chan_send, websocat_process, diff .. "\n")
-			if not success then
-				error_log("Failed to send update: " .. tostring(err))
+	local cmd = {
+		"websocat",
+		"ws://" .. M.server_address .. M.endpoint,
+	}
+
+	local stdin = uv.new_pipe(false)
+	local stdout = uv.new_pipe(false)
+	local stderr = uv.new_pipe(false)
+
+	local handle
+	local ok, err = pcall(function()
+		handle = uv.spawn(
+			cmd[1],
+			{ args = { unpack(cmd, 2) }, stdio = { stdin, stdout, stderr } },
+			function(code, signal)
+				if code ~= 0 then
+					util.notify_error(string.format("WebSocket exited with code %d, signal %d", code, signal))
+				end
+				stdin:close()
+				stdout:close()
+				stderr:close()
+				if M.ws_process then
+					M.ws_process:close()
+					M.ws_process = nil
+				end
 			end
-		end
-
-		last_content = current_content
+		)
 	end)
-end
 
----Handles buffer unload events
----@return nil
-function M.on_buffer_unload()
-	M.stop()
-end
-
----Stops all processes (public API for LiveStop command)
----@return nil
-function M.stop()
-	if server_handle then
-		server_handle:kill("sigterm")
-		log("Sent stop signal to server process")
+	if not ok or not handle then
+		util.notify_error("Failed to start WebSocket process: " .. (err or "unknown error"))
+		stdin:close()
+		stdout:close()
+		stderr:close()
+		return
 	end
 
-	if websocat_process then
-		vim.fn.jobstop(websocat_process)
-		log("Sent stop signal to WebSocket process")
-	end
+	M.ws_process = handle
 
-	if update_timer then
-		vim.fn.timer_stop(update_timer)
-		update_timer = nil
-	end
-
-	vim.defer_fn(function()
-		local running_servers = check_server_running()
-		if #running_servers > 0 then
-			error_log("Some server instances are still running. Forcing shutdown...")
-			for _, pid in ipairs(running_servers) do
-				uv.kill(pid, "sigkill")
-			end
+	stdin:write(content, function(err)
+		if err then
+			util.notify_error("Error writing to WebSocket stdin: " .. err)
 		end
-		is_running = false
-		server_handle = nil
-		websocat_process = nil
-		log("Stopped live synchronization")
-	end, 5000)
+		stdin:shutdown(function(err)
+			if err then
+				util.notify_error("Error shutting down stdin: " .. err)
+			end
+			stdin:close()
+		end)
+	end)
+
+	-- end of operation: Send content via WebSocket
+	-- _______
 end
 
----Function to be called when the plugin is disabled
----@return nil
-function M.disable_plugin()
-	M.stop()
-end
+function M.stop_sync()
+	-- _______
+	-- operation: Stop buffer synchronization
+	-- _______
 
----Setup function to be called when the plugin is loaded
----@return nil
-function M.setup()
-	-- Any setup logic can be added here if needed in the future
-end
-
----Checks for running server instances
----@return nil
-function M.check_running_servers()
-	local running_servers = check_server_running()
-	if #running_servers > 0 then
-		log("Server instances running with PIDs: " .. table.concat(running_servers, ", "))
-	else
-		log("No server instances are currently running.")
+	if M.ws_process then
+		M.ws_process:kill()
+		M.ws_process:close()
+		M.ws_process = nil
+		util.notify_info("WebSocket process stopped.")
 	end
+
+	-- end of operation: Stop buffer synchronization
+	-- _______
+end
+
+function M.set_autocommands()
+	-- _______
+	-- operation: Set autocommands
+	-- _______
+
+	api.nvim_exec(
+		[[
+    augroup LiveSync
+      autocmd!
+      autocmd TextChanged,TextChangedI <buffer> lua require'live.core'.on_text_change()
+      autocmd BufUnload,BufWipeout <buffer> lua require'live.core'.stop()
+    augroup END
+  ]],
+		false
+	)
+
+	-- end of operation: Set autocommands
+	-- _______
+end
+
+function M.remove_autocommands()
+	-- _______
+	-- operation: Remove autocommands
+	-- _______
+
+	api.nvim_command("augroup LiveSync | autocmd! | augroup END")
+
+	-- end of operation: Remove autocommands
+	-- _______
 end
 
 return M
