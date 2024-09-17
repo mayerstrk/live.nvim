@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Live.nvim Viewer</title>
+    <script>
+      window.addEventListener("load", function (evt) {
+        var output = document.getElementById("output");
+        var ws;
+
+        function print(message) {
+          output.textContent = message;
+        }
+
+        ws = new WebSocket("ws://" + window.location.host + "/ws");
+        ws.onopen = function (evt) {
+          console.log("WebSocket connection opened");
+        };
+        ws.onclose = function (evt) {
+          console.log("WebSocket connection closed");
+        };
+        ws.onmessage = function (evt) {
+          print(evt.data);
+        };
+      });
+    </script>
+  </head>
+  <body>
+    <pre id="output"></pre>
+  </body>
+</html>

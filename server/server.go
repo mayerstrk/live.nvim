@@ -1,181 +1,98 @@
 package main
 
 import (
-	"embed"
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
-	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 
 	"github.com/gorilla/websocket"
 )
 
-//go:embed web/*
-var webFiles embed.FS
-
-var upgrader = websocket.Upgrader{}
-
 var (
-	contentMutex sync.Mutex
-	content      = make(map[string]string) // Map endpoint to content
+	port      = flag.Int("port", 8080, "port to serve on")
+	upgrader  = websocket.Upgrader{}
+	clients   = make(map[*websocket.Conn]bool)
+	broadcast = make(chan string)
+	mutex     = &sync.Mutex{}
 )
 
 func main() {
-	// _______
-	// operation: Start Go server
-	// _______
-
-	port := flag.String("port", "0", "server port")
 	flag.Parse()
 
-	listener, err := net.Listen("tcp", ":"+*port)
+	// _______
+	// operation: Starting Go server
+
+	fs := http.FileServer(http.Dir("./static"))
+	http.Handle("/", fs)
+	http.HandleFunc("/ws", handleConnections)
+
+	go handleMessages()
+
+	addr := fmt.Sprintf(":%d", *port)
+	log.Printf("Starting server on %s", addr)
+	err := http.ListenAndServe(addr, nil)
 	if err != nil {
-		log.Fatalf("Failed to listen on port %s: %v", *port, err)
+		log.Fatalf("ListenAndServe: %v", err)
 	}
-	defer listener.Close()
 
-	actualPort := listener.Addr().(*net.TCPAddr).Port
-	fmt.Printf("Server started on port %d\n", actualPort)
-
-	http.HandleFunc("/code", handleWebSocket)
-	http.HandleFunc("/markdown", handleWebSocket)
-	http.HandleFunc("/", serveWeb)
-
-	server := &http.Server{}
-
-	go func() {
-		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP server error: %v", err)
-		}
-	}()
-
-	waitForShutdown(server)
-
-	// end of operation: Start Go server
+	// end of operation: Starting Go server
 	// _______
 }
 
-func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+func handleConnections(w http.ResponseWriter, r *http.Request) {
 	// _______
-	// operation: Handle WebSocket connection
-	// _______
+	// operation: Handling WebSocket connection
 
-	upgrader.CheckOrigin = func(r *http.Request) bool {
-		// Allow all origins for local development
-		return true
-	}
-
+	upgrader.CheckOrigin = func(r *http.Request) bool { return true }
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("Failed to upgrade connection: %v", err)
+		log.Printf("Upgrade error: %v", err)
 		return
 	}
-	defer func() {
-		err := ws.Close()
-		if err != nil {
-			log.Printf("Failed to close WebSocket: %v", err)
-		}
-	}()
+	defer ws.Close()
 
-	endpoint := r.URL.Path
-	log.Printf("Client connected to %s", endpoint)
+	mutex.Lock()
+	clients[ws] = true
+	mutex.Unlock()
 
 	for {
-		messageType, msg, err := ws.ReadMessage()
+		_, message, err := ws.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("WebSocket error: %v", err)
-			} else {
-				log.Printf("Client disconnected from %s: %v", endpoint, err)
-			}
+			log.Printf("ReadMessage error: %v", err)
+			mutex.Lock()
+			delete(clients, ws)
+			mutex.Unlock()
 			break
 		}
+		broadcast <- string(message)
+	}
 
-		err = processMessage(endpoint, msg)
-		if err != nil {
-			log.Printf("Failed to process message: %v", err)
-			ws.WriteMessage(websocket.TextMessage, []byte("Error processing message"))
-			continue
+	// end of operation: Handling WebSocket connection
+	// _______
+}
+
+func handleMessages() {
+	for {
+		// _______
+		// operation: Broadcasting messages
+
+		msg := <-broadcast
+		mutex.Lock()
+		for client := range clients {
+			err := client.WriteMessage(websocket.TextMessage, []byte(msg))
+			if err != nil {
+				log.Printf("WriteMessage error: %v", err)
+				client.Close()
+				delete(clients, client)
+			} else {
+				log.Printf("Message broadcasted to client.")
+			}
 		}
+		mutex.Unlock()
 
-		broadcastContent(ws, messageType, endpoint)
+		// end of operation: Broadcasting messages
+		// _______
 	}
-
-	log.Printf("Connection to %s closed", endpoint)
-
-	// end of operation: Handle WebSocket connection
-	// _______
-}
-
-func serveWeb(w http.ResponseWriter, r *http.Request) {
-	// _______
-	// operation: Serve web content
-	// _______
-
-	http.FileServer(http.FS(webFiles)).ServeHTTP(w, r)
-
-	// end of operation: Serve web content
-	// _______
-}
-
-func processMessage(endpoint string, msg []byte) error {
-	// _______
-	// operation: Process received message
-	// _______
-
-	contentMutex.Lock()
-	defer contentMutex.Unlock()
-
-	// For this example, we replace the content entirely
-	content[endpoint] = string(msg)
-	log.Printf("Updated content for %s", endpoint)
-
-	// end of operation: Process received message
-	// _______
-
-	return nil
-}
-
-func broadcastContent(ws *websocket.Conn, messageType int, endpoint string) {
-	// _______
-	// operation: Broadcast content to client
-	// _______
-
-	contentMutex.Lock()
-	data := content[endpoint]
-	contentMutex.Unlock()
-
-	err := ws.WriteMessage(messageType, []byte(data))
-	if err != nil {
-		log.Printf("Failed to send content: %v", err)
-	}
-
-	// end of operation: Broadcast content to client
-	// _______
-}
-
-func waitForShutdown(server *http.Server) {
-	// _______
-	// operation: Wait for server shutdown
-	// _______
-
-	stopChan := make(chan os.Signal, 1)
-	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
-
-	<-stopChan
-	log.Println("Shutdown signal received")
-
-	if err := server.Close(); err != nil {
-		log.Fatalf("Server close failed: %v", err)
-	}
-
-	log.Println("Server gracefully stopped")
-
-	// end of operation: Wait for server shutdown
-	// _______
 }

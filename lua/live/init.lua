@@ -1,9 +1,13 @@
-local core = require("live.core")
+-- init.lua
+local live = require("live.core")
 
-local M = {}
+-- Define user commands
+vim.api.nvim_create_user_command("LiveStart", function(opts)
+	live.start(opts)
+end, {
+	nargs = "*",
+})
 
-function M.setup(opts)
-	core.setup(opts)
-end
-
-return M
+vim.api.nvim_create_user_command("LiveStop", function()
+	live.stop()
+end, {})
