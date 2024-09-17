@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"sync"
 
@@ -14,7 +13,7 @@ import (
 
 var (
 	addr     = flag.String("addr", "localhost", "http service address")
-	port     = flag.String("port", "0", "port number")
+	port     = flag.String("port", "8080", "port number")
 	upgrader = websocket.Upgrader{}
 	content  = struct {
 		sync.RWMutex
@@ -29,17 +28,12 @@ func main() {
 	http.HandleFunc("/code", handleWebSocket)
 	http.HandleFunc("/", serveHome)
 
-	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%s", *addr, *port))
-	if err != nil {
-		log.Fatal("Listen error:", err)
-	}
-	actualPort := listener.Addr().(*net.TCPAddr).Port
-	log.Printf("Server started on http://%s:%d", *addr, actualPort)
-	fmt.Printf("%d\n", actualPort) // Output port to stdout
+	serverAddress := fmt.Sprintf("%s:%s", *addr, *port)
+	log.Printf("Server starting on http://%s", serverAddress)
 
-	err = http.Serve(listener, nil)
+	err := http.ListenAndServe(serverAddress, nil)
 	if err != nil {
-		log.Fatal("Serve error:", err)
+		log.Fatal("ListenAndServe error:", err)
 	}
 }
 

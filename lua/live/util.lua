@@ -4,11 +4,15 @@ local uv = vim.loop
 
 -- Operation: Logging
 function M.log_info(msg)
-	vim.notify("[Live.nvim] " .. msg, vim.log.levels.INFO)
+	vim.schedule(function()
+		vim.notify("[Live.nvim] " .. msg, vim.log.levels.INFO)
+	end)
 end
 
 function M.log_error(msg)
-	vim.notify("[Live.nvim] " .. msg, vim.log.levels.ERROR)
+	vim.schedule(function()
+		vim.notify("[Live.nvim] " .. msg, vim.log.levels.ERROR)
+	end)
 end
 -- End of operation: Logging
 
@@ -49,18 +53,17 @@ end
 
 -- Operation: Debounce
 function M.debounce(func, timeout)
-	local timer_id
+	local timer = nil
 	return function(...)
 		local args = { ... }
-		if timer_id then
-			uv.timer_stop(timer_id)
-		else
-			timer_id = uv.new_timer()
+		if timer then
+			timer:stop()
+			timer:close()
 		end
-		uv.timer_start(timer_id, timeout, 0, function()
-			uv.timer_stop(timer_id)
-			uv.close(timer_id)
-			timer_id = nil
+		timer = uv.new_timer()
+		timer:start(timeout, 0, function()
+			timer:stop()
+			timer:close()
 			func(unpack(args))
 		end)
 	end
