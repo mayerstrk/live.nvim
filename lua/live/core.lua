@@ -8,6 +8,9 @@ local websocat_job = nil
 local autocmds = {}
 local port = nil
 
+local project_root = util.get_project_root()
+local server_go_path = project_root .. "server/server.go"
+
 -- Operation: Setup
 function M.setup(opts)
 	M.config = opts or {}
@@ -32,7 +35,7 @@ function M.start(server_address, endpoint)
 			-- Start the Go server
 			server_job = Job:new({
 				command = "go",
-				args = { "run", "/absolute/path/to/server.go", "--port", tostring(port) },
+				args = { "run", server_go_path, "--port", tostring(port) },
 				on_stdout = function(_, data)
 					util.log_info("Go server output: " .. data)
 				end,
