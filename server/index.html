@@ -1,0 +1,34 @@
+<!-- index.html -->
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Live Preview</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 20px;
+      }
+      pre {
+        white-space: pre-wrap;
+        word-wrap: break-word;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="content"></div>
+
+    <script>
+      var ws = new WebSocket("ws://" + location.host + "/code");
+      ws.onmessage = function (event) {
+        document.getElementById("content").innerText = event.data;
+      };
+      ws.onclose = function () {
+        console.error("WebSocket closed.");
+      };
+      ws.onerror = function (error) {
+        console.error("WebSocket error:", error);
+      };
+    </script>
+  </body>
+</html>

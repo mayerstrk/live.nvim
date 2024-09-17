@@ -1,234 +1,141 @@
--- core.lua
+-- lua/live/core.lua
 local M = {}
-local uv = vim.loop
-local log = require("live.util").log
+local util = require("live.util")
+local Job = require("plenary.job")
 
-local server_handle = nil
-local websocat_handle = nil
-local autocmd_id = nil
-local buffer = nil
+local server_job = nil
+local websocat_job = nil
+local autocmds = {}
+local port = nil
 
-function M.start(opts)
-	-- _______
-	-- operation: LiveStart command execution
-
-	-- Check if already running
-	if server_handle or websocat_handle then
-		log("Live.nvim is already running.")
-		return
-	end
-
-	-- Start the Go server
-	local server_port = M.start_server()
-	if not server_port then
-		log("Failed to start the Go server.")
-		return
-	end
-
-	-- Start websocat
-	local success = M.start_websocat(server_port)
-	if not success then
-		log("Failed to start websocat.")
-		M.stop_server()
-		return
-	end
-
-	-- Set up autocommand for buffer changes
-	M.setup_autocmd()
-
-	log("Live.nvim started successfully.")
-
-	-- end of operation: LiveStart command execution
-	-- _______
+-- Operation: Setup
+function M.setup(opts)
+	-- You can add setup configurations here
+	M.config = opts or {}
 end
+-- End of operation: Setup
 
+-- Operation: Start
+function M.start(server_address, endpoint)
+	local ok, err = pcall(function()
+		if not server_address then
+			-- Start the Go server
+			port = util.get_available_port()
+			server_job = Job:new({
+				command = "go",
+				args = { "run", "path/to/server.go", "--port", tostring(port) },
+				on_stdout = function(err, data)
+					if err then
+						util.log_error("Server error: " .. err)
+					else
+						util.log_info("Server output: " .. data)
+					end
+				end,
+				on_exit = function()
+					util.log_info("Go server has exited.")
+				end,
+			})
+			server_job:start()
+			server_address = "ws://localhost:" .. port
+			util.log_info("Go server started on port " .. port)
+		end
+
+		local filetype = vim.bo.filetype
+		local endpoint_path = endpoint or (filetype == "markdown" and "/markdown" or "/code")
+		local websocket_url = server_address .. endpoint_path
+		util.log_info("WebSocket URL: " .. websocket_url)
+
+		-- Start websocat
+		websocat_job = Job:new({
+			command = "websocat",
+			args = { "-t", websocket_url },
+			on_stdout = function(err, data)
+				if err then
+					util.log_error("Websocat error: " .. err)
+				else
+					util.log_info("Websocat output: " .. data)
+				end
+			end,
+			on_exit = function()
+				util.log_info("Websocat has exited.")
+			end,
+		})
+		websocat_job:start()
+
+		-- Send initial buffer content
+		local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+		websocat_job:send(content)
+
+		-- Set up autocommands for buffer changes
+		local group = vim.api.nvim_create_augroup("LiveSync", { clear = true })
+		autocmds[#autocmds + 1] = group
+
+		vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
+			group = group,
+			buffer = 0,
+			callback = util.debounce(function()
+				local ok, err = pcall(function()
+					local new_content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+					local diff = util.compute_diff(content, new_content)
+					websocat_job:send(diff)
+					content = new_content
+				end)
+				if not ok then
+					util.log_error("Error sending diff: " .. err)
+					M.stop()
+				end
+			end, 500),
+		})
+
+		-- Handle buffer close
+		vim.api.nvim_create_autocmd("BufWipeout", {
+			group = group,
+			buffer = 0,
+			callback = function()
+				M.stop()
+			end,
+		})
+
+		util.log_info("Live synchronization started.")
+	end)
+
+	if not ok then
+		util.log_error("Failed to start live synchronization: " .. err)
+		M.stop()
+	end
+end
+-- End of operation: Start
+
+-- Operation: Stop
 function M.stop()
-	-- _______
-	-- operation: LiveStop command execution
+	local ok, err = pcall(function()
+		-- Stop websocat
+		if websocat_job then
+			websocat_job:shutdown()
+			websocat_job = nil
+			util.log_info("WebSocket client stopped.")
+		end
 
-	M.stop_autocmd()
-	M.stop_websocat()
-	M.stop_server()
-	log("Live.nvim stopped successfully.")
+		-- Stop Go server
+		if server_job then
+			server_job:shutdown()
+			server_job = nil
+			util.log_info("Go server stopped.")
+		end
 
-	-- end of operation: LiveStop command execution
-	-- _______
-end
+		-- Remove autocommands
+		for _, group in ipairs(autocmds) do
+			vim.api.nvim_del_augroup_by_id(group)
+		end
+		autocmds = {}
 
-function M.start_server()
-	-- _______
-	-- operation: Starting Go server
-
-	local port = math.random(10000, 60000)
-	local cmd = { "go", "run", "server.go", "--port", tostring(port) }
-	local handle, pid = nil, nil
-
-	local success, err = pcall(function()
-		handle, pid = uv.spawn("go", {
-			args = { "run", "server.go", "--port", tostring(port) },
-			stdio = { nil, nil, nil },
-		}, function(code, signal)
-			if code ~= 0 then
-				log("Go server exited with code " .. code)
-			end
-			handle:close()
-		end)
+		util.log_info("Live synchronization stopped.")
 	end)
 
-	if not success then
-		log("Error starting Go server: " .. tostring(err))
-		return nil
-	else
-		log("Go server started on port " .. port)
-		server_handle = handle
-		return port
+	if not ok then
+		util.log_error("Failed to stop live synchronization: " .. err)
 	end
-
-	-- end of operation: Starting Go server
-	-- _______
 end
-
-function M.stop_server()
-	-- _______
-	-- operation: Stopping Go server
-
-	if server_handle then
-		local success, err = pcall(function()
-			server_handle:kill("sigterm")
-			server_handle = nil
-		end)
-		if not success then
-			log("Error stopping Go server: " .. tostring(err))
-		else
-			log("Go server stopped successfully.")
-		end
-	end
-
-	-- end of operation: Stopping Go server
-	-- _______
-end
-
-function M.start_websocat(port)
-	-- _______
-	-- operation: Starting websocat
-
-	local cmd = { "websocat", "-t", "ws://localhost:" .. tostring(port) .. "/ws" }
-	local handle, pid = nil, nil
-
-	local success, err = pcall(function()
-		handle, pid = uv.spawn("websocat", {
-			args = { "-t", "ws://localhost:" .. tostring(port) .. "/ws" },
-			stdio = { nil, nil, nil },
-		}, function(code, signal)
-			if code ~= 0 then
-				log("websocat exited with code " .. code)
-			end
-			handle:close()
-		end)
-	end)
-
-	if not success then
-		log("Error starting websocat: " .. tostring(err))
-		return false
-	else
-		log("websocat started successfully.")
-		websocat_handle = handle
-		return true
-	end
-
-	-- end of operation: Starting websocat
-	-- _______
-end
-
-function M.stop_websocat()
-	-- _______
-	-- operation: Stopping websocat
-
-	if websocat_handle then
-		local success, err = pcall(function()
-			websocat_handle:kill("sigterm")
-			websocat_handle = nil
-		end)
-		if not success then
-			log("Error stopping websocat: " .. tostring(err))
-		else
-			log("websocat stopped successfully.")
-		end
-	end
-
-	-- end of operation: Stopping websocat
-	-- _______
-end
-
-function M.setup_autocmd()
-	-- _______
-	-- operation: Setting up autocommand
-
-	buffer = vim.api.nvim_get_current_buf()
-	autocmd_id = vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
-		buffer = buffer,
-		callback = function()
-			M.on_text_changed()
-		end,
-	})
-	log("Autocommand set up for buffer " .. buffer)
-
-	-- end of operation: Setting up autocommand
-	-- _______
-end
-
-function M.stop_autocmd()
-	-- _______
-	-- operation: Removing autocommand
-
-	if autocmd_id then
-		local success, err = pcall(function()
-			vim.api.nvim_del_autocmd(autocmd_id)
-			autocmd_id = nil
-		end)
-		if not success then
-			log("Error removing autocommand: " .. tostring(err))
-		else
-			log("Autocommand removed successfully.")
-		end
-	end
-
-	-- end of operation: Removing autocommand
-	-- _______
-end
-
-function M.on_text_changed()
-	-- _______
-	-- operation: Handling text change
-
-	local lines = vim.api.nvim_buf_get_lines(buffer, 0, -1, false)
-	local content = table.concat(lines, "\n")
-	-- Send content to the server via websocat
-	M.send_content(content)
-
-	-- end of operation: Handling text change
-	-- _______
-end
-
-function M.send_content(content)
-	-- _______
-	-- operation: Sending content via websocat
-
-	local success, err = pcall(function()
-		-- Assuming you have a way to write to websocat's stdin
-		-- For the purpose of this example, we'll just log the content
-		log("Sending content. Length: " .. #content)
-		-- Implement actual sending logic here
-	end)
-
-	if not success then
-		log("Error sending content: " .. tostring(err))
-	else
-		log("Content sent successfully.")
-	end
-
-	-- end of operation: Sending content via websocat
-	-- _______
-end
+-- End of operation: Stop
 
 return M
