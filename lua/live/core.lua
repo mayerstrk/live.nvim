@@ -12,30 +12,72 @@ local last_content = nil
 local active_buffer = nil
 ---@type number|nil
 local websocat_job_id = nil
+---@type number|nil
+local debounce_timer = nil
 
 ---@param opts LiveOptions
 function M.setup(opts)
 	-- Any core setup logic can go here
 end
 
+---@return boolean success
+---@return string? error
+local function send_current_buffer()
+	if not active_buffer or not websocat_job_id then
+		return false, "Buffer not active or websocat not running"
+	end
+
+	local lines = vim.api.nvim_buf_get_lines(active_buffer, 0, -1, false)
+	local content = table.concat(lines, "\n")
+
+	local json_content = vim.fn.json_encode({
+		type = "full_content",
+		content = content,
+	})
+
+	local success, send_error = pcall(vim.fn.chansend, websocat_job_id, json_content .. "\n")
+	if not success then
+		return false, "Failed to send buffer content: " .. tostring(send_error)
+	end
+
+	last_content = content
+	return true
+end
+
 ---@param current_content string
----@return string|nil diff
+---@return table|nil diff
 ---@return string? error
 local function create_diff_update(current_content)
 	if last_content == nil then
 		last_content = current_content
-		return current_content -- First update, send full content
+		return {
+			type = "full_content",
+			content = current_content,
+		}
 	end
 
 	local success, result = pcall(vim.diff, last_content, current_content, {
-		result_type = "unified",
+		result_type = "indices",
 		algorithm = "myers",
 		ctxlen = 3,
 	})
 
 	if success then
+		local diff_updates = {}
+		for _, hunk in ipairs(result) do
+			table.insert(diff_updates, {
+				start_a = hunk[1],
+				count_a = hunk[2],
+				start_b = hunk[3],
+				count_b = hunk[4],
+				lines = vim.split(current_content, "\n", { plain = true }):slice(hunk[3], hunk[3] + hunk[4] - 1),
+			})
+		end
 		last_content = current_content
-		return result
+		return {
+			type = "diff_update",
+			diffs = diff_updates,
+		}
 	else
 		return nil, "Failed to create diff: " .. tostring(result)
 	end
@@ -57,11 +99,30 @@ local function send_diff_update()
 	end
 
 	if diff then
-		local success, send_error = pcall(vim.fn.chansend, websocat_job_id, diff .. "\n")
+		local json_diff = vim.fn.json_encode(diff)
+		local success, send_error = pcall(vim.fn.chansend, websocat_job_id, json_diff .. "\n")
 		if not success then
 			return false, "Failed to send update: " .. tostring(send_error)
 		end
 	end
+
+	return true
+end
+
+---@return boolean success
+---@return string? error
+local function debounced_send_diff_update()
+	if debounce_timer then
+		vim.fn.timer_stop(debounce_timer)
+	end
+
+	debounce_timer = vim.fn.timer_start(2000, function()
+		local success, error = send_diff_update()
+		if not success then
+			logger.log("Failed to send diff update: " .. error, "ERROR")
+		end
+		debounce_timer = nil
+	end)
 
 	return true
 end
@@ -105,7 +166,7 @@ local function setup_autocmds()
 	local text_changed_success, text_changed_error = util.create_autocmd({ "TextChanged", "TextChangedI" }, {
 		group = "LiveUpdates",
 		buffer = active_buffer,
-		callback = send_diff_update,
+		callback = debounced_send_diff_update,
 	})
 	if not text_changed_success then
 		return false, text_changed_error
@@ -148,6 +209,12 @@ function M.start_live_updates(ws_url)
 
 	active_buffer = vim.api.nvim_get_current_buf()
 
+	local send_buffer_success, send_buffer_error = send_current_buffer()
+	if not send_buffer_success then
+		M.stop_live_updates()
+		return false, "Failed to send initial buffer content: " .. send_buffer_error
+	end
+
 	local autocmd_success, autocmd_error = setup_autocmds()
 	if not autocmd_success then
 		M.stop_live_updates()
@@ -171,6 +238,11 @@ function M.stop_live_updates()
 			table.insert(error_messages, stop_error)
 		end
 		websocat_job_id = nil
+	end
+
+	if debounce_timer then
+		vim.fn.timer_stop(debounce_timer)
+		debounce_timer = nil
 	end
 
 	local clear_success, clear_error = util.clear_autocmds("LiveUpdates")
