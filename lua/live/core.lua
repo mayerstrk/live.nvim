@@ -27,16 +27,23 @@ local function send_current_buffer()
 		return false, "Buffer not active or websocat not running"
 	end
 
-	local lines = vim.api.nvim_buf_get_lines(active_buffer, 0, -1, false)
+	local success, lines = pcall(vim.api.nvim_buf_get_lines, active_buffer, 0, -1, false)
+	if not success then
+		return false, "Failed to get buffer lines: " .. tostring(lines)
+	end
+
 	local content = table.concat(lines, "\n")
 
-	local json_content = vim.fn.json_encode({
+	local json_success, json_content = pcall(vim.fn.json_encode, {
 		type = "full_content",
 		content = content,
 	})
+	if not json_success then
+		return false, "Failed to encode JSON: " .. tostring(json_content)
+	end
 
-	local success, send_error = pcall(vim.fn.chansend, websocat_job_id, json_content .. "\n")
-	if not success then
+	local send_success, send_error = pcall(vim.fn.chansend, websocat_job_id, json_content .. "\n")
+	if not send_success then
 		return false, "Failed to send buffer content: " .. tostring(send_error)
 	end
 
@@ -56,31 +63,44 @@ local function create_diff_update(current_content)
 		}
 	end
 
-	local success, result = pcall(vim.diff, last_content, current_content, {
+	local diff_success, result = pcall(vim.diff, last_content, current_content, {
 		result_type = "indices",
 		algorithm = "myers",
 		ctxlen = 3,
 	})
 
-	if success then
-		local diff_updates = {}
-		for _, hunk in ipairs(result) do
-			table.insert(diff_updates, {
-				start_a = hunk[1],
-				count_a = hunk[2],
-				start_b = hunk[3],
-				count_b = hunk[4],
-				lines = vim.split(current_content, "\n", { plain = true }):slice(hunk[3], hunk[3] + hunk[4] - 1),
-			})
-		end
-		last_content = current_content
-		return {
-			type = "diff_update",
-			diffs = diff_updates,
-		}
-	else
+	if not diff_success then
 		return nil, "Failed to create diff: " .. tostring(result)
 	end
+
+	local diff_updates = {}
+	for _, hunk in ipairs(result) do
+		local split_success, lines = pcall(vim.split, current_content, "\n", { plain = true })
+		if not split_success then
+			return nil, "Failed to split content: " .. tostring(lines)
+		end
+
+		local slice_success, sliced_lines = pcall(function()
+			return { unpack(lines, hunk[3], hunk[3] + hunk[4] - 1) }
+		end)
+		if not slice_success then
+			return nil, "Failed to slice lines: " .. tostring(sliced_lines)
+		end
+
+		table.insert(diff_updates, {
+			start_a = hunk[1],
+			count_a = hunk[2],
+			start_b = hunk[3],
+			count_b = hunk[4],
+			lines = sliced_lines,
+		})
+	end
+
+	last_content = current_content
+	return {
+		type = "diff_update",
+		diffs = diff_updates,
+	}
 end
 
 ---@return boolean success
@@ -90,18 +110,26 @@ local function send_diff_update()
 		return false, "Buffer not active or websocat not running"
 	end
 
-	local lines = vim.api.nvim_buf_get_lines(active_buffer, 0, -1, false)
+	local get_lines_success, lines = pcall(vim.api.nvim_buf_get_lines, active_buffer, 0, -1, false)
+	if not get_lines_success then
+		return false, "Failed to get buffer lines: " .. tostring(lines)
+	end
+
 	local content = table.concat(lines, "\n")
 
-	local diff, diff_error = create_diff_update(content)
-	if diff_error then
-		return false, diff_error
+	local diff_success, diff = pcall(create_diff_update, content)
+	if not diff_success then
+		return false, "Failed to create diff update: " .. tostring(diff)
 	end
 
 	if diff then
-		local json_diff = vim.fn.json_encode(diff)
-		local success, send_error = pcall(vim.fn.chansend, websocat_job_id, json_diff .. "\n")
-		if not success then
+		local json_success, json_diff = pcall(vim.fn.json_encode, diff)
+		if not json_success then
+			return false, "Failed to encode JSON: " .. tostring(json_diff)
+		end
+
+		local send_success, send_error = pcall(vim.fn.chansend, websocat_job_id, json_diff .. "\n")
+		if not send_success then
 			return false, "Failed to send update: " .. tostring(send_error)
 		end
 	end
@@ -113,10 +141,13 @@ end
 ---@return string? error
 local function debounced_send_diff_update()
 	if debounce_timer then
-		vim.fn.timer_stop(debounce_timer)
+		local stop_success, stop_error = pcall(vim.fn.timer_stop, debounce_timer)
+		if not stop_success then
+			logger.log("Failed to stop debounce timer: " .. tostring(stop_error), "ERROR")
+		end
 	end
 
-	debounce_timer = vim.fn.timer_start(2000, function()
+	local timer_success, timer_error = pcall(vim.fn.timer_start, 2000, function()
 		local success, error = send_diff_update()
 		if not success then
 			logger.log("Failed to send diff update: " .. error, "ERROR")
@@ -124,6 +155,11 @@ local function debounced_send_diff_update()
 		debounce_timer = nil
 	end)
 
+	if not timer_success then
+		return false, "Failed to start debounce timer: " .. tostring(timer_error)
+	end
+
+	debounce_timer = timer_error -- In success case, timer_error is actually the timer id
 	return true
 end
 
@@ -131,7 +167,7 @@ end
 ---@return boolean success
 ---@return string? error
 local function start_websocat(ws_url)
-	local job_id = vim.fn.jobstart({ "websocat", ws_url }, {
+	local job_start_success, job_id = pcall(vim.fn.jobstart, { "websocat", ws_url }, {
 		on_stderr = function(_, data)
 			if data then
 				for _, line in ipairs(data) do
@@ -147,8 +183,12 @@ local function start_websocat(ws_url)
 		end,
 	})
 
+	if not job_start_success then
+		return false, "Failed to start websocat: " .. tostring(job_id)
+	end
+
 	if job_id <= 0 then
-		return false, "Failed to start websocat"
+		return false, "Failed to start websocat: Invalid job ID"
 	end
 
 	websocat_job_id = job_id
@@ -207,7 +247,13 @@ function M.start_live_updates(ws_url)
 		return false, websocat_error
 	end
 
-	active_buffer = vim.api.nvim_get_current_buf()
+	local buffer_success, buffer_error = pcall(function()
+		active_buffer = vim.api.nvim_get_current_buf()
+	end)
+	if not buffer_success then
+		M.stop_live_updates()
+		return false, "Failed to get current buffer: " .. tostring(buffer_error)
+	end
 
 	local send_buffer_success, send_buffer_error = send_current_buffer()
 	if not send_buffer_success then
@@ -241,7 +287,11 @@ function M.stop_live_updates()
 	end
 
 	if debounce_timer then
-		vim.fn.timer_stop(debounce_timer)
+		local timer_stop_success, timer_stop_error = pcall(vim.fn.timer_stop, debounce_timer)
+		if not timer_stop_success then
+			all_operations_successful = false
+			table.insert(error_messages, "Failed to stop debounce timer: " .. tostring(timer_stop_error))
+		end
 		debounce_timer = nil
 	end
 
