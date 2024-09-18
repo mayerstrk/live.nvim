@@ -8,11 +8,21 @@ local M = {}
 local core = require("live.core")
 ---@type LiveLogger
 local logger = require("live.logger")
+---@type LiveUtil
+local util = require("live.util")
 
 ---@param opts LiveOptions
 ---@return boolean success
 ---@return string? error
 function M.setup(opts)
+	if not util.is_linux() then
+		return false, "This plugin currently supports only Linux systems"
+	end
+
+	if not util.has_websocat() then
+		return false, "websocat is not installed or not in PATH"
+	end
+
 	opts = opts or {}
 	local setup_success, setup_error = pcall(function()
 		logger.setup(opts.log_level or "INFO")
@@ -36,25 +46,13 @@ function M.start(ws_url)
 		return false, "Invalid WebSocket URL"
 	end
 
-	local start_success, start_error = pcall(core.start_live_updates, ws_url)
-	if start_success then
-		return true
-	else
-		logger.log("Error starting live updates: " .. tostring(start_error), "ERROR")
-		return false, start_error
-	end
+	return core.start_live_updates(ws_url)
 end
 
 ---@return boolean success
 ---@return string? error
 function M.stop()
-	local stop_success, stop_error = pcall(core.stop_live_updates)
-	if stop_success then
-		return true
-	else
-		logger.log("Error stopping live updates: " .. tostring(stop_error), "ERROR")
-		return false, stop_error
-	end
+	return core.stop_live_updates()
 end
 
 return M
